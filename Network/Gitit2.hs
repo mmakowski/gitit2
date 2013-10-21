@@ -74,11 +74,11 @@ infixr 5 <>
 -- Create GititMessages.
 mkMessage "Gitit" "messages" "en"
 
-type GH master a = GHandler Gitit master a
-type GW master a = GWidget Gitit master a
+type GH master a = HandlerT Gitit (HandlerT master IO) a
+type GW master a = WidgetT Gitit (WidgetT master IO) a
 
 data Plugin master = Plugin {
-       unPlugin :: WikiPage -> GHandler Gitit master WikiPage
+       unPlugin :: WikiPage -> HandlerT Gitit (HandlerT master IO) WikiPage
        }
 
 applyPlugin :: WikiPage -> Plugin master -> GH master WikiPage
@@ -90,9 +90,9 @@ applyPlugin wp pl = unPlugin pl wp
 class (Yesod master, RenderMessage master FormMessage,
        RenderMessage master GititMessage) => HasGitit master where
   -- | Return user information, if user is logged in, or nothing.
-  maybeUser   :: GHandler sub master (Maybe GititUser)
+  maybeUser   :: HandlerT sub (HandlerT master IO) (Maybe GititUser)
   -- | Return user information or redirect to login page.
-  requireUser :: GHandler sub master GititUser
+  requireUser :: HandlerT sub (HandlerT master IO) GititUser
   -- | Gitit subsite page layout.
   makePage :: PageLayout -> GW master () -> GH master RepHtml
   -- | Plugins.
@@ -224,8 +224,7 @@ data WikiPage = WikiPage {
 } deriving (Show)
 
 -- Create routes.
-mkYesodSub "Gitit" [ ClassP ''HasGitit [VarT $ mkName "master"]
- ] [parseRoutesNoCheck|
+mkYesodSubData "Gitit" [parseRoutesNoCheck|
 / HomeR GET
 /_help HelpR GET
 /_static StaticR Static getStatic
@@ -259,11 +258,11 @@ mkYesodSub "Gitit" [ ClassP ''HasGitit [VarT $ mkName "master"]
 |]
 
 getConfig :: GH master GititConfig
-getConfig = config <$> getYesodSub
+getConfig = config <$> getYesod
 
 makeDefaultPage :: HasGitit master => PageLayout -> GW master () -> GH master RepHtml
 makeDefaultPage layout content = do
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   let logoRoute = toMaster $ StaticR $ StaticRoute ["img","logo.png"] []
   let feedRoute = toMaster $ StaticR $ StaticRoute ["img","icons","feed.png"] []
   let searchRoute = toMaster SearchR
@@ -273,7 +272,7 @@ makeDefaultPage layout content = do
   let showTab t = t `elem` pgTabs layout
   printLayout <- lookupGetParam "print"
   exportFormats <- getExportFormats
-  defaultLayout $ do
+  defaultLayoutSub $ do
     addStylesheet $ toMaster $ StaticR $
       case printLayout of
            Just _  -> StaticRoute ["css","print.css"] []
@@ -350,12 +349,12 @@ makeDefaultPage layout content = do
 -- | Convert links with no URL to wikilinks.
 convertWikiLinks :: Inline -> GH master Inline
 convertWikiLinks (Link ref ("", "")) = do
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   toUrl <- getUrlRender
   let route = ViewR $ textToPage $ T.pack $ stringify ref
   return $ Link ref (T.unpack $ toUrl $ toMaster route, "")
 convertWikiLinks (Image ref ("", "")) = do
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   toUrl <- getUrlRender
   let route = ViewR $ textToPage $ T.pack $ stringify ref
   return $ Image ref (T.unpack $ toUrl $ toMaster route, "")
@@ -422,7 +421,7 @@ isPageFile f = do
 
 allPageFiles :: GH master [FilePath]
 allPageFiles = do
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   liftIO (index fs) >>= filterM isPageFile
 
 isDiscussPageFile :: FilePath -> GH master Bool
@@ -457,13 +456,13 @@ getHelpR = do
 
 getRandomR :: HasGitit master => GH master RepHtml
 getRandomR = do
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   files <- liftIO $ index fs
   pages <- mapM pageForPath =<< filterM (fmap not . isDiscussPageFile)
                             =<<filterM isPageFile files
   pagenum <- liftIO $ randomRIO (0, length pages - 1)
   let thepage = pages !! pagenum
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   redirect $ toMaster $ ViewR thepage
 
 getRawR :: HasGitit master => Page -> GH master RepPlain
@@ -482,7 +481,7 @@ getRawR page = do
 getDeleteR :: HasGitit master => Page -> GH master RepHtml
 getDeleteR page = do
   requireUser
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   path <- pathForPage page
   pageTest <- liftIO $ try $ latest fs path
   fileToDelete <- case pageTest of
@@ -495,7 +494,7 @@ getDeleteR page = do
                               Left FS.NotFound  -> fail (show FS.NotFound)
                               Left e      -> fail (show e)
                        Left e        -> fail (show e)
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   makePage pageLayout{ pgName = Just page
                      , pgTabs = []
                      } $ do
@@ -511,8 +510,8 @@ getDeleteR page = do
 postDeleteR :: HasGitit master => Page -> GH master RepHtml
 postDeleteR page = do
   user <- requireUser
-  fs <- filestore <$> getYesodSub
-  toMaster <- getRouteToMaster
+  fs <- filestore <$> getYesod
+  toMaster <- getRouteToParent
   mr <- getMessageRender
   fileToDelete <- runInputPost $ ireq textField "fileToDelete"
   liftIO $ FS.delete fs (T.unpack fileToDelete)
@@ -545,7 +544,7 @@ getRevisionR rev = view (Just rev)
 
 view :: HasGitit master => Maybe RevisionId -> Page -> GH master RepHtml
 view mbrev page = do
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   path <- pathForPage page
   mbcont <- getRawContents path mbrev
   case mbcont of
@@ -574,7 +573,7 @@ view mbrev page = do
                   let content = toContent contents
                   caching path' (return (ct, content)) >>= sendResponse
    where layout tabs categories cont = do
-           toMaster <- getRouteToMaster
+           toMaster <- getRouteToParent
            makePage pageLayout{ pgName = Just page
                               , pgPageTools = True
                               , pgTabs = tabs
@@ -611,13 +610,13 @@ getIndexR (Page xs) = getIndexFor xs
 
 getIndexFor :: HasGitit master => [Text] -> GH master RepHtml
 getIndexFor paths = do
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   listing <- liftIO $ directory fs $ T.unpack $ T.intercalate "/" paths
   let isDiscussionPage (FSFile f) = isDiscussPageFile f
       isDiscussionPage (FSDirectory _) = return False
   prunedListing <- filterM (fmap not . isDiscussionPage) listing
   let updirs = inits $ filter (not . T.null) paths
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   let process (FSFile f) = do
         Page page <- pageForPath f
         ispage <- isPageFile f
@@ -651,7 +650,7 @@ getRawContents :: HasGitit master
                -> Maybe RevisionId
                -> GH master (Maybe ByteString)
 getRawContents path rev = do
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   liftIO $ handle (\e -> if e == FS.NotFound then return Nothing else throw e)
          $ Just <$> retrieve fs path rev
 
@@ -732,7 +731,7 @@ mathjax_url = "https://d3eoax9i5htok0.cloudfront.net/mathjax/latest/MathJax.js?c
 
 toWikiPage :: HasGitit master => Html -> GW master ()
 toWikiPage rendered = do
-  cfg <- config <$> lift getYesodSub
+  cfg <- config <$> lift getYesod
   when (use_mathjax cfg) $ addScriptRemote mathjax_url
   toWidget rendered
 
@@ -751,7 +750,7 @@ postGoR = do
   let exactMatch f = gotopage == f
   let insensitiveMatch f = gotopage' == T.toLower f
   let prefixMatch f = gotopage' `T.isPrefixOf` T.toLower f
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   case (findPage exactMatch `mplus` findPage insensitiveMatch `mplus`
         findPage prefixMatch) of
        Just m  -> redirect $ toMaster $ ViewR $ textToPage m
@@ -759,7 +758,7 @@ postGoR = do
 
 searchResults :: HasGitit master => [Text] -> GH master RepHtml
 searchResults patterns = do
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   matchLines <- if null patterns
                    then return []
                    else liftIO $ search fs SearchQuery{
@@ -789,7 +788,7 @@ searchResults patterns = do
                                          else 0
   let matches' = reverse $ sortBy (comparing relevance) matches
   let matches'' = map (\(f,c) -> (textToPage $ T.pack $ dropExtension f, c)) matches'
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   makePage pageLayout{ pgName = Nothing
                      , pgTabs = []
                      , pgSelectedTab = EditTab } $ do
@@ -824,7 +823,7 @@ searchResults patterns = do
 getEditR :: HasGitit master => Page -> GH master RepHtml
 getEditR page = do
   requireUser
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   path <- pathForPage page
   mbcont <- getRawContents path Nothing
   let contents = case mbcont of
@@ -862,7 +861,7 @@ edit revert txt mbrevid page = do
   (form, enctype) <- generateFormPost $ editForm
                      $ Just Edit{ editContents = contents
                                 , editComment = comment }
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   let route = toMaster $ case mbrevid of
                     Just revid -> UpdateR revid page
                     Nothing    -> CreateR page
@@ -904,8 +903,8 @@ update' :: HasGitit master
 update' mbrevid page = do
   user <- requireUser
   ((result, widget), enctype) <- runFormPost $ editForm Nothing
-  fs <- filestore <$> getYesodSub
-  toMaster <- getRouteToMaster
+  fs <- filestore <$> getYesod
+  toMaster <- getRouteToParent
   let route = toMaster $ case mbrevid of
                   Just revid  -> UpdateR revid page
                   Nothing     -> CreateR page
@@ -939,7 +938,7 @@ data Edit = Edit { editContents :: Textarea
 editForm :: HasGitit master
          => Maybe Edit
          -> Html
-         -> MForm Gitit master (FormResult Edit, GW master ())
+         -> MForm (HandlerT Gitit (HandlerT master IO)) (FormResult Edit, GW master ())
 editForm mbedit = renderDivs $ Edit
     <$> areq textareaField (fieldSettingsLabel MsgPageSource)
            (editContents <$> mbedit)
@@ -954,7 +953,7 @@ editForm mbedit = renderDivs $ Edit
 getDiffR :: HasGitit master
          => RevisionId -> RevisionId -> Page -> GH master RepHtml
 getDiffR fromRev toRev page = do
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   pagePath <- pathForPage page
   filePath <- pathForFile page
   rawDiff <- liftIO
@@ -983,7 +982,7 @@ getHistoryR :: HasGitit master
             => Int -> Page -> GH master RepHtml
 getHistoryR start page = do
   let items = 20 -- items per page
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   pagePath <- pathForPage page
   filePath <- pathForFile page
   path <- liftIO
@@ -995,7 +994,7 @@ getHistoryR start page = do
   hist <- liftIO $ drop offset <$>
            history fs [path] (TimeRange Nothing Nothing) (Just $ start + items)
   let hist' = zip [(1 :: Int)..] hist
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   let pageForwardLink = if length hist > items
                            then Just $ toMaster
                                      $ HistoryR (start + items) page
@@ -1046,7 +1045,7 @@ revisionDetails :: HasGitit master
                 => Revision
                 -> GW master ()
 revisionDetails rev = do
-  toMaster <- lift getRouteToMaster
+  toMaster <- lift getRouteToParent
   let toChange :: Change -> GH master (Text, Page)
       toChange (Modified f) = ("modified",) <$> pageForPath f
       toChange (Deleted  f) = ("deleted",)  <$> pageForPath f
@@ -1080,10 +1079,10 @@ getActivityR :: HasGitit master
 getActivityR start = do
   let items = 20
   let offset = start - 1
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   hist <- liftIO $ drop offset <$>
            history fs [] (TimeRange Nothing Nothing) (Just $ start + items)
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   let pageForwardLink = if length hist > items
                            then Just $ toMaster
                                      $ ActivityR (start + items)
@@ -1120,9 +1119,9 @@ feed :: HasGitit master
      -> GH master (Feed (Route master))
 feed mbpage = do
   days <- feed_days <$> getConfig
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   mr <- getMessageRender
-  fs <- filestore <$> getYesodSub
+  fs <- filestore <$> getYesod
   now <- liftIO getCurrentTime
   paths <- case mbpage of
                 Just p  -> (:[]) <$> pathForPage p
@@ -1280,7 +1279,7 @@ basicExport templ contentType writer = \wikiPage -> do
               $ Pandoc (Meta (wpTitle wikiPage) [] []) $ wpContent wikiPage
   return (contentType, toContent rendered)
 
-setFilename :: Text -> GHandler sub master ()
+setFilename :: Text -> HandlerT sub master ()
 setFilename fname = setHeader "Content-Disposition"
                   $ "attachment; filename=\"" <> fname <> "\""
 
@@ -1295,7 +1294,7 @@ showUploadForm :: HasGitit master
                -> GW master ()
                -> GH master RepHtml
 showUploadForm enctype form = do
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   makePage pageLayout{ pgName = Nothing
                      , pgTabs = []
                      , pgSelectedTab = EditTab } $ do
@@ -1324,7 +1323,7 @@ data Upload = Upload { uploadFile        :: FileInfo
 uploadForm :: HasGitit master
            => Maybe Upload
            -> Html
-           -> MForm Gitit master (FormResult Upload, GW master ())
+           -> MForm (HandlerT Gitit (HandlerT master IO)) (FormResult Upload, GW master ())
 uploadForm mbupload =
   renderDivs $ Upload
      <$> fileAFormReq (fieldSettingsLabel MsgFileToUpload){
@@ -1349,8 +1348,8 @@ postUploadR :: HasGitit master => GH master RepHtml
 postUploadR = do
   user <- requireUser
   ((result, widget), enctype) <- runFormPost $ uploadForm Nothing
-  fs <- filestore <$> getYesodSub
-  toMaster <- getRouteToMaster
+  fs <- filestore <$> getYesod
+  toMaster <- getRouteToParent
   case result of
        FormSuccess r -> do
          let fileinfo = uploadFile r
@@ -1397,20 +1396,12 @@ postExpireR page = do
        pathForPage page >>= expireCache
        pathForFile page >>= expireCache
      else return ()
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   redirect $ toMaster $ ViewR page
 
-caching :: HasReps a
-        => FilePath -> GH master a -> GH master a
-caching path handler = do
-  conf <- getConfig
-  if use_cache conf
-     then do
-       result <- handler
-       (ct, contents) <- liftIO $ chooseRep result []
-       cacheContent path (ct, contents)
-       return result
-     else handler
+-- TODO (MM): restore caching
+caching :: FilePath -> GH master a -> GH master a
+caching path handler = handler
 
 cacheContent :: FilePath -> (ContentType, Content) -> GH master ()
 cacheContent path (ct, content) = do
@@ -1489,7 +1480,7 @@ getCategoriesR :: HasGitit master => GH master RepHtml
 getCategoriesR = do
   tryCache "_categories"
   conf <- getConfig
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   let repopath = repository_path conf
   allpages <- map (repopath </>) <$> allPageFiles
   allcategories <- liftIO $ nub . sort . concat <$> mapM readCategories allpages
@@ -1509,7 +1500,7 @@ getCategoryR category = do
   let cachepage = "_categories" </> T.unpack category
   tryCache cachepage
   conf <- getConfig
-  toMaster <- getRouteToMaster
+  toMaster <- getRouteToParent
   let repopath = repository_path conf
   allpages <- allPageFiles
   let hasCategory pg = elem category <$> readCategories (repopath </> pg)
