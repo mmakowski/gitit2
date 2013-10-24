@@ -108,6 +108,10 @@ data Gitit = Gitit{ config        :: GititConfig  -- ^ Wiki config options.
 
 instance Yesod Gitit
 
+-- TODO:
+--instance HasGitit master => YesodSubDispatch Gitit (HandlerT master IO) where
+--  yesodSubDispatch = $(mkYesodSubDispath resourcesGitit)
+
 -- | Configuration for a gitit wiki.
 data GititConfig = GititConfig{
        mime_types       :: M.Map String ContentType -- ^ Table of mime types
@@ -260,7 +264,7 @@ mkYesodSubData "Gitit" [parseRoutesNoCheck|
 getConfig :: GH master GititConfig
 getConfig = config <$> getYesod
 
-makeDefaultPage :: HasGitit master => PageLayout -> GW master () -> GH master RepHtml
+makeDefaultPage :: HasGitit master => PageLayout -> WidgetT master IO () -> GH master RepHtml
 makeDefaultPage layout content = do
   toMaster <- getRouteToParent
   let logoRoute = toMaster $ StaticR $ StaticRoute ["img","logo.png"] []
@@ -272,7 +276,7 @@ makeDefaultPage layout content = do
   let showTab t = t `elem` pgTabs layout
   printLayout <- lookupGetParam "print"
   exportFormats <- getExportFormats
-  defaultLayoutSub $ do
+  lift $ defaultLayout $ do
     addStylesheet $ toMaster $ StaticR $
       case printLayout of
            Just _  -> StaticRoute ["css","print.css"] []
