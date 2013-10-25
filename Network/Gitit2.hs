@@ -354,12 +354,12 @@ makeDefaultPage layout content = do
 convertWikiLinks :: Inline -> GH master Inline
 convertWikiLinks (Link ref ("", "")) = do
   toMaster <- getRouteToParent
-  toUrl <- getUrlRender
+  toUrl <- lift getUrlRender
   let route = ViewR $ textToPage $ T.pack $ stringify ref
   return $ Link ref (T.unpack $ toUrl $ toMaster route, "")
 convertWikiLinks (Image ref ("", "")) = do
   toMaster <- getRouteToParent
-  toUrl <- getUrlRender
+  toUrl <- lift getUrlRender
   let route = ViewR $ textToPage $ T.pack $ stringify ref
   return $ Image ref (T.unpack $ toUrl $ toMaster route, "")
 convertWikiLinks x = return x
